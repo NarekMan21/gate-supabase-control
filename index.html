@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Управление воротами</title>
+  <link rel="stylesheet" href="style.css?v=client-ui-2">
+</head>
+<body>
+  <main class="shell">
+    <section id="auth-card" class="login-card">
+      <div class="brand-mark"></div>
+      <h1>Мои ворота</h1>
+      <p class="hint">Войдите, чтобы открыть или закрыть ворота одним нажатием.</p>
+      <label>Email</label>
+      <input id="email" type="email" autocomplete="username" placeholder="admin@gate.local">
+      <label>Пароль</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Введите пароль">
+      <button id="login-button" class="primary-button">Войти</button>
+      <p id="auth-message" class="message"></p>
+    </section>
+
+    <section id="app" class="hidden">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Панель управления</p>
+          <h1>Ворота</h1>
+        </div>
+        <button id="logout-button" class="icon-button" title="Выйти" aria-label="Выйти">⏻</button>
+      </header>
+
+      <div id="gates" class="gate-grid"></div>
+
+      <section class="history-panel">
+        <div class="section-heading">
+          <h2>История</h2>
+          <p>Последние действия</p>
+        </div>
+        <div id="logs" class="logs"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="script.js?v=client-ui-2"></script>
+</body>
+</html>

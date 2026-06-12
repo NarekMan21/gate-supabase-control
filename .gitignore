@@ -1,0 +1,5 @@
+admin.local.txt
+node_modules/
+site.log
+site-error.log
+.DS_Store
