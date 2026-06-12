@@ -56,6 +56,8 @@ language plpgsql
 security definer
 set search_path = public, extensions
 as $$
+declare
+  gate_row public.gates%rowtype;
 begin
   if auth.uid() is null then
     raise exception 'auth required';
@@ -65,16 +67,28 @@ begin
     raise exception 'bad command';
   end if;
 
+  select *
+  into gate_row
+  from public.gates
+  where id = p_gate_id
+  for update;
+
+  if not found then
+    raise exception 'gate not found';
+  end if;
+
+  if gate_row.result = 'PENDING'
+     and gate_row.ack_id <> gate_row.command_id
+     and gate_row.updated_at > now() - interval '15 seconds' then
+    raise exception 'command in progress';
+  end if;
+
   update public.gates
   set command = p_command,
       command_id = p_command_id,
       result = 'PENDING',
       updated_at = now()
   where id = p_gate_id;
-
-  if not found then
-    raise exception 'gate not found';
-  end if;
 
   insert into public.logs(gate_id, command, command_id, result, source)
   values (p_gate_id, p_command, p_command_id, 'PENDING', 'web');
@@ -148,7 +162,15 @@ begin
 
   select command into current_command
   from public.gates
-  where id = p_gate_id;
+  where id = p_gate_id
+    and command_id = p_command_id
+  for update;
+
+  if not found then
+    insert into public.logs(gate_id, command, command_id, result, source)
+    values (p_gate_id, 'STALE_ACK', p_command_id, p_result, 'esp8266');
+    return;
+  end if;
 
   update public.gates
   set ack_id = p_command_id,
@@ -156,7 +178,8 @@ begin
       command = 'NONE',
       last_seen = now(),
       updated_at = now()
-  where id = p_gate_id;
+  where id = p_gate_id
+    and command_id = p_command_id;
 
   insert into public.logs(gate_id, command, command_id, result, source)
   values (p_gate_id, current_command, p_command_id, p_result, 'esp8266');

@@ -3,6 +3,7 @@ const supabaseUrl = (config.SUPABASE_URL || "").replace(/\/+$/, "");
 const supabaseAnonKey = config.SUPABASE_ANON_KEY || "";
 const commandTimeoutMs = config.COMMAND_TIMEOUT_MS || 10000;
 const onlineWindowSeconds = config.ONLINE_WINDOW_SECONDS || 60;
+const requestTimeoutMs = config.REQUEST_TIMEOUT_MS || 8000;
 const sessionKey = "gate-control-session-v1";
 
 const gates = [
@@ -21,7 +22,10 @@ const gatesContainer = document.getElementById("gates");
 const logsContainer = document.getElementById("logs");
 
 let refreshTimer = null;
+let logsRefreshTimer = null;
 let session = null;
+let lastGateRows = [];
+const busyGateIds = new Set();
 
 function assertConfig() {
   if (!supabaseUrl || !supabaseAnonKey || supabaseUrl.includes("YOUR-PROJECT")) {
@@ -50,22 +54,41 @@ function clearSession() {
   localStorage.removeItem(sessionKey);
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, retry = true) {
+  const { timeoutMs = requestTimeoutMs, authMode = "session", ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const headers = {
     apikey: supabaseAnonKey,
     "Content-Type": "application/json",
-    ...options.headers,
+    ...fetchOptions.headers,
   };
-  if (session?.access_token) {
+  if (authMode === "session" && session?.access_token) {
     headers.Authorization = `Bearer ${session.access_token}`;
   } else {
     headers.Authorization = `Bearer ${supabaseAnonKey}`;
   }
 
-  const response = await fetch(`${supabaseUrl}${path}`, {
-    ...options,
-    headers,
-  });
+  let response;
+  try {
+    response = await fetch(`${supabaseUrl}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Сеть долго не отвечает. Попробуйте ещё раз.");
+    }
+    throw new Error("Не удалось связаться с сервером.");
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (response.status === 401 && retry && authMode === "session" && session?.refresh_token) {
+    await refreshSession();
+    return request(path, options, false);
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(parseError(text) || `Ошибка ${response.status}`);
@@ -77,10 +100,23 @@ async function request(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+async function refreshSession() {
+  const data = await request("/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    authMode: "anon",
+    body: JSON.stringify({ refresh_token: session.refresh_token }),
+  }, false);
+  saveSession(data);
+}
+
 function parseError(text) {
   try {
     const body = JSON.parse(text);
-    return body.msg || body.message || body.error_description || body.error;
+    const message = body.msg || body.message || body.error_description || body.error;
+    if (message === "command in progress") {
+      return "Подождите: предыдущая команда ещё выполняется.";
+    }
+    return message;
   } catch {
     return text;
   }
@@ -114,11 +150,35 @@ function friendlyResult(result) {
   return "Ожидание";
 }
 
+function pendingFresh(gate) {
+  if (gate.result !== "PENDING" || !gate.updated_at) {
+    return false;
+  }
+  return Date.now() - new Date(gate.updated_at).getTime() <= 15000;
+}
+
+function setGateMessage(gateId, text, ok = false) {
+  const message = document.getElementById(`msg-${gateId}`);
+  if (!message) {
+    return;
+  }
+  message.textContent = text;
+  message.classList.toggle("ok", ok);
+}
+
 function renderGates(rows) {
   const byId = new Map(rows.map((row) => [row.id, row]));
   gatesContainer.innerHTML = gates.map((gateMeta) => {
     const gate = byId.get(gateMeta.id) || { id: gateMeta.id, command: "NONE", result: "UNKNOWN" };
     const online = gateOnline(gate);
+    const processing = busyGateIds.has(gateMeta.id) || pendingFresh(gate);
+    const message = busyGateIds.has(gateMeta.id)
+      ? "Выполняется..."
+      : pendingFresh(gate)
+        ? "Устройство выполняет команду..."
+        : online
+          ? "Готово к команде"
+          : "Проверьте питание или Wi-Fi";
     return `
       <section class="gate-card" data-gate="${gateMeta.id}">
         <div class="gate-head">
@@ -130,10 +190,10 @@ function renderGates(rows) {
         </div>
 
         <div class="action-row">
-          <button class="gate-button open" data-action="OPEN" data-gate="${gateMeta.id}" ${online ? "" : "disabled"}>Открыть</button>
-          <button class="gate-button close" data-action="CLOSE" data-gate="${gateMeta.id}" ${online ? "" : "disabled"}>Закрыть</button>
+          <button class="gate-button open" data-action="OPEN" data-gate="${gateMeta.id}" ${online && !processing ? "" : "disabled"}>Открыть</button>
+          <button class="gate-button close" data-action="CLOSE" data-gate="${gateMeta.id}" ${online && !processing ? "" : "disabled"}>Закрыть</button>
         </div>
-        <p id="msg-${gateMeta.id}" class="message">${online ? "Готово к команде" : "Проверьте питание или Wi-Fi"}</p>
+        <p id="msg-${gateMeta.id}" class="message">${message}</p>
       </section>
     `;
   }).join("");
@@ -156,41 +216,49 @@ function renderLogs(rows) {
   `).join("");
 }
 
-async function loadData() {
-  const [gateRows, logRows] = await Promise.all([
-    request("/rest/v1/gates?select=*&order=id.asc"),
-    request("/rest/v1/logs?select=*&order=created_at.desc&limit=20"),
-  ]);
-  renderGates(gateRows || []);
+async function loadGates() {
+  const gateRows = await request("/rest/v1/gates?select=*&order=id.asc", { timeoutMs: 6000 });
+  lastGateRows = gateRows || [];
+  renderGates(lastGateRows);
+}
+
+async function loadLogs() {
+  const logRows = await request("/rest/v1/logs?select=*&order=created_at.desc&limit=20", { timeoutMs: 6000 });
   renderLogs(logRows || []);
+}
+
+async function loadData() {
+  await loadGates();
+  loadLogs().catch(console.error);
 }
 
 async function waitForAck(gateId, commandId) {
   const startedAt = Date.now();
+  let lastError = null;
   while (Date.now() - startedAt < commandTimeoutMs) {
-    const rows = await request(`/rest/v1/gates?select=ack_id,result&id=eq.${encodeURIComponent(gateId)}&limit=1`);
-    const data = rows?.[0];
-    if (Number(data?.ack_id) === commandId && data.result === "DONE") {
-      const message = document.getElementById(`msg-${gateId}`);
-      if (message) {
-        message.textContent = "Готово";
-        message.classList.add("ok");
+    try {
+      const rows = await request(`/rest/v1/gates?select=ack_id,result&id=eq.${encodeURIComponent(gateId)}&limit=1`, { timeoutMs: 4000 });
+      const data = rows?.[0];
+      if (Number(data?.ack_id) === commandId && data.result === "DONE") {
+        setGateMessage(gateId, "Готово", true);
+        return true;
       }
-      return true;
+    } catch (error) {
+      lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 700));
   }
-  const message = document.getElementById(`msg-${gateId}`);
-  if (message) {
-    message.innerHTML = "<span class='error'>Нет ответа. Попробуйте ещё раз.</span>";
-  }
+  setGateMessage(gateId, lastError ? lastError.message : "Нет ответа. Попробуйте ещё раз.");
   return false;
 }
 
 async function sendCommand(gateId, command) {
-  const message = document.getElementById(`msg-${gateId}`);
-  message.classList.remove("ok");
-  message.textContent = command === "OPEN" ? "Открываю..." : "Закрываю...";
+  if (busyGateIds.has(gateId)) {
+    return;
+  }
+  busyGateIds.add(gateId);
+  renderGates(lastGateRows);
+  setGateMessage(gateId, command === "OPEN" ? "Открываю..." : "Закрываю...");
   const commandId = Date.now();
 
   try {
@@ -202,18 +270,21 @@ async function sendCommand(gateId, command) {
         p_command_id: commandId,
       }),
     });
-    document.getElementById(`msg-${gateId}`).textContent = "Жду подтверждение...";
+    setGateMessage(gateId, "Команда отправлена. Жду устройство...");
     const ok = await waitForAck(gateId, commandId);
+    busyGateIds.delete(gateId);
+    await loadGates();
     if (ok) {
-      await loadData();
-      const finalMessage = document.getElementById(`msg-${gateId}`);
-      if (finalMessage) {
-        finalMessage.textContent = "Готово";
-        finalMessage.classList.add("ok");
-      }
+      setGateMessage(gateId, "Готово", true);
+      loadLogs().catch(console.error);
     }
   } catch (error) {
-    message.innerHTML = `<span class="error">${error.message}</span>`;
+    busyGateIds.delete(gateId);
+    renderGates(lastGateRows);
+    const message = document.getElementById(`msg-${gateId}`);
+    if (message) {
+      message.innerHTML = `<span class="error">${error.message}</span>`;
+    }
   }
 }
 
@@ -223,6 +294,7 @@ async function login() {
   try {
     const data = await request("/auth/v1/token?grant_type=password", {
       method: "POST",
+      authMode: "anon",
       body: JSON.stringify({
         email: emailInput.value.trim(),
         password: passwordInput.value,
@@ -244,6 +316,9 @@ async function logout() {
   if (refreshTimer) {
     clearInterval(refreshTimer);
   }
+  if (logsRefreshTimer) {
+    clearInterval(logsRefreshTimer);
+  }
 }
 
 async function showApp() {
@@ -253,7 +328,11 @@ async function showApp() {
   if (refreshTimer) {
     clearInterval(refreshTimer);
   }
-  refreshTimer = setInterval(() => loadData().catch(console.error), 5000);
+  if (logsRefreshTimer) {
+    clearInterval(logsRefreshTimer);
+  }
+  refreshTimer = setInterval(() => loadGates().catch(console.error), 8000);
+  logsRefreshTimer = setInterval(() => loadLogs().catch(console.error), 30000);
 }
 
 async function boot() {
