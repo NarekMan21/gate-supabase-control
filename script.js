@@ -21,7 +21,6 @@ const logsContainer = document.getElementById("logs");
 
 let supabaseClient = null;
 let refreshTimer = null;
-const visualStateByGate = new Map();
 
 function assertConfig() {
   if (!supabaseUrl || !supabaseAnonKey || supabaseUrl.includes("YOUR-PROJECT")) {
@@ -72,28 +71,14 @@ function renderGates(rows) {
   gatesContainer.innerHTML = gates.map((gateMeta) => {
     const gate = byId.get(gateMeta.id) || { id: gateMeta.id, command: "NONE", result: "UNKNOWN" };
     const online = gateOnline(gate);
-    const visualState = visualStateByGate.get(gateMeta.id) || "";
-    const busy = gate.result === "PENDING";
-    const stateClass = [
-      visualState,
-      busy && gate.command === "OPEN" ? "is-opening" : "",
-      busy && gate.command === "CLOSE" ? "is-closing" : "",
-    ].filter(Boolean).join(" ");
     return `
-      <section class="gate-card ${stateClass}" data-gate="${gateMeta.id}">
+      <section class="gate-card" data-gate="${gateMeta.id}">
         <div class="gate-head">
           <div>
             <h2>${gateMeta.title}</h2>
             <p class="gate-subtitle">${gateMeta.subtitle}</p>
           </div>
           <span class="status-pill ${online ? "online" : "offline"}">${online ? "На связи" : "Нет связи"}</span>
-        </div>
-
-        <div class="gate-visual" aria-hidden="true">
-          <div class="gate-sky"></div>
-          <div class="gate-door left"></div>
-          <div class="gate-door right"></div>
-          <div class="gate-ground"></div>
         </div>
 
         <div class="action-row">
@@ -177,9 +162,6 @@ async function sendCommand(gateId, command) {
   let message = document.getElementById(`msg-${gateId}`);
   message.classList.remove("ok");
   message.textContent = command === "OPEN" ? "Открываю..." : "Закрываю...";
-  visualStateByGate.set(gateId, command === "OPEN" ? "is-opening" : "is-closing");
-  renderGates(await currentGateRows());
-  message = document.getElementById(`msg-${gateId}`);
   const commandId = Date.now();
 
   const { error } = await supabaseClient.rpc("send_gate_command", {
@@ -197,7 +179,6 @@ async function sendCommand(gateId, command) {
   document.getElementById(`msg-${gateId}`).textContent = "Жду подтверждение...";
   const ok = await waitForAck(gateId, commandId);
   if (ok) {
-    visualStateByGate.set(gateId, command === "OPEN" ? "opened" : "");
     await loadData();
     const finalMessage = document.getElementById(`msg-${gateId}`);
     if (finalMessage) {

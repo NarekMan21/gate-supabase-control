@@ -161,7 +161,7 @@ button:disabled {
 }
 
 .gate-card {
-  min-height: 470px;
+  min-height: 230px;
   padding: 22px;
   border-radius: 28px;
   background: rgba(255, 255, 255, .84);
@@ -215,83 +215,11 @@ button:disabled {
   color: #d92d20;
 }
 
-.gate-visual {
-  position: relative;
-  height: 180px;
-  margin: 26px 0 22px;
-  border-radius: 24px;
-  background:
-    linear-gradient(180deg, #dfe7ef 0%, #f7f8fa 58%, #ccd5df 100%);
-  overflow: hidden;
-  box-shadow: inset 0 0 0 1px rgba(29, 29, 31, .08);
-}
-
-.gate-sky {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.78), transparent 45%),
-    linear-gradient(135deg, rgba(0,122,255,.12), transparent 50%);
-}
-
-.gate-ground {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 38px;
-  background: linear-gradient(180deg, #9aa4af, #68717c);
-}
-
-.gate-door {
-  position: absolute;
-  bottom: 33px;
-  width: 40%;
-  height: 104px;
-  background: linear-gradient(145deg, #333a44, #15191f);
-  box-shadow: 0 14px 22px rgba(0, 0, 0, .18);
-  transition: transform .9s cubic-bezier(.2, .8, .2, 1);
-}
-
-.gate-door.left {
-  left: 10%;
-  transform-origin: left center;
-  border-radius: 12px 3px 3px 12px;
-}
-
-.gate-door.right {
-  right: 10%;
-  transform-origin: right center;
-  border-radius: 3px 12px 12px 3px;
-}
-
-.gate-door::after {
-  content: "";
-  position: absolute;
-  inset: 16px;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 6px;
-}
-
-.gate-card.is-opening .gate-door.left,
-.gate-card.opened .gate-door.left {
-  transform: perspective(420px) rotateY(54deg);
-}
-
-.gate-card.is-opening .gate-door.right,
-.gate-card.opened .gate-door.right {
-  transform: perspective(420px) rotateY(-54deg);
-}
-
-.gate-card.is-closing .gate-door.left,
-.gate-card.is-closing .gate-door.right {
-  transform: perspective(420px) rotateY(0deg);
-}
-
 .action-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+  margin-top: 34px;
 }
 
 .gate-button {
@@ -377,10 +305,6 @@ button:disabled {
 
   h1 {
     font-size: 34px;
-  }
-
-  .gate-card {
-    min-height: 430px;
   }
 
   .log-row,
