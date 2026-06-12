@@ -2,4 +2,5 @@ admin.local.txt
 node_modules/
 site.log
 site-error.log
+supabase/.temp/
 .DS_Store
