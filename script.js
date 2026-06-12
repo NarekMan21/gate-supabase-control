@@ -1,8 +1,9 @@
 const config = window.GATE_CONFIG || {};
-const supabaseUrl = config.SUPABASE_URL || "";
+const supabaseUrl = (config.SUPABASE_URL || "").replace(/\/+$/, "");
 const supabaseAnonKey = config.SUPABASE_ANON_KEY || "";
 const commandTimeoutMs = config.COMMAND_TIMEOUT_MS || 10000;
 const onlineWindowSeconds = config.ONLINE_WINDOW_SECONDS || 60;
+const sessionKey = "gate-control-session-v1";
 
 const gates = [
   { id: "gate1", title: "Первые ворота", subtitle: "Основной въезд" },
@@ -19,23 +20,70 @@ const authMessage = document.getElementById("auth-message");
 const gatesContainer = document.getElementById("gates");
 const logsContainer = document.getElementById("logs");
 
-let supabaseClient = null;
 let refreshTimer = null;
+let session = null;
 
 function assertConfig() {
   if (!supabaseUrl || !supabaseAnonKey || supabaseUrl.includes("YOUR-PROJECT")) {
-    authMessage.textContent = "Заполните config.js: SUPABASE_URL и SUPABASE_ANON_KEY.";
+    authMessage.textContent = "Не настроен config.js.";
     loginButton.disabled = true;
     return false;
   }
   return true;
 }
 
-function setupClient() {
-  if (!assertConfig()) {
-    return;
+function loadSession() {
+  try {
+    session = JSON.parse(localStorage.getItem(sessionKey) || "null");
+  } catch {
+    session = null;
   }
-  supabaseClient = supabase.createClient(supabaseUrl, supabaseAnonKey);
+}
+
+function saveSession(nextSession) {
+  session = nextSession;
+  localStorage.setItem(sessionKey, JSON.stringify(nextSession));
+}
+
+function clearSession() {
+  session = null;
+  localStorage.removeItem(sessionKey);
+}
+
+async function request(path, options = {}) {
+  const headers = {
+    apikey: supabaseAnonKey,
+    "Content-Type": "application/json",
+    ...options.headers,
+  };
+  if (session?.access_token) {
+    headers.Authorization = `Bearer ${session.access_token}`;
+  } else {
+    headers.Authorization = `Bearer ${supabaseAnonKey}`;
+  }
+
+  const response = await fetch(`${supabaseUrl}${path}`, {
+    ...options,
+    headers,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(parseError(text) || `Ошибка ${response.status}`);
+  }
+  if (response.status === 204) {
+    return null;
+  }
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+function parseError(text) {
+  try {
+    const body = JSON.parse(text);
+    return body.msg || body.message || body.error_description || body.error;
+  } catch {
+    return text;
+  }
 }
 
 function gateOnline(gate) {
@@ -109,23 +157,10 @@ function renderLogs(rows) {
 }
 
 async function loadData() {
-  const { data: gateRows, error: gatesError } = await supabaseClient
-    .from("gates")
-    .select("*")
-    .order("id");
-  if (gatesError) {
-    throw gatesError;
-  }
-
-  const { data: logRows, error: logsError } = await supabaseClient
-    .from("logs")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(20);
-  if (logsError) {
-    throw logsError;
-  }
-
+  const [gateRows, logRows] = await Promise.all([
+    request("/rest/v1/gates?select=*&order=id.asc"),
+    request("/rest/v1/logs?select=*&order=created_at.desc&limit=20"),
+  ]);
   renderGates(gateRows || []);
   renderLogs(logRows || []);
 }
@@ -133,16 +168,10 @@ async function loadData() {
 async function waitForAck(gateId, commandId) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < commandTimeoutMs) {
-    const message = document.getElementById(`msg-${gateId}`);
-    const { data, error } = await supabaseClient
-      .from("gates")
-      .select("ack_id,result")
-      .eq("id", gateId)
-      .single();
-    if (error) {
-      throw error;
-    }
-    if (Number(data.ack_id) === commandId && data.result === "DONE") {
+    const rows = await request(`/rest/v1/gates?select=ack_id,result&id=eq.${encodeURIComponent(gateId)}&limit=1`);
+    const data = rows?.[0];
+    if (Number(data?.ack_id) === commandId && data.result === "DONE") {
+      const message = document.getElementById(`msg-${gateId}`);
       if (message) {
         message.textContent = "Готово";
         message.classList.add("ok");
@@ -159,61 +188,57 @@ async function waitForAck(gateId, commandId) {
 }
 
 async function sendCommand(gateId, command) {
-  let message = document.getElementById(`msg-${gateId}`);
+  const message = document.getElementById(`msg-${gateId}`);
   message.classList.remove("ok");
   message.textContent = command === "OPEN" ? "Открываю..." : "Закрываю...";
   const commandId = Date.now();
 
-  const { error } = await supabaseClient.rpc("send_gate_command", {
-    p_gate_id: gateId,
-    p_command: command,
-    p_command_id: commandId,
-  });
-  if (error) {
-    if (message) {
-      message.innerHTML = `<span class="error">${error.message}</span>`;
+  try {
+    await request("/rest/v1/rpc/send_gate_command", {
+      method: "POST",
+      body: JSON.stringify({
+        p_gate_id: gateId,
+        p_command: command,
+        p_command_id: commandId,
+      }),
+    });
+    document.getElementById(`msg-${gateId}`).textContent = "Жду подтверждение...";
+    const ok = await waitForAck(gateId, commandId);
+    if (ok) {
+      await loadData();
+      const finalMessage = document.getElementById(`msg-${gateId}`);
+      if (finalMessage) {
+        finalMessage.textContent = "Готово";
+        finalMessage.classList.add("ok");
+      }
     }
-    return;
+  } catch (error) {
+    message.innerHTML = `<span class="error">${error.message}</span>`;
   }
-
-  document.getElementById(`msg-${gateId}`).textContent = "Жду подтверждение...";
-  const ok = await waitForAck(gateId, commandId);
-  if (ok) {
-    await loadData();
-    const finalMessage = document.getElementById(`msg-${gateId}`);
-    if (finalMessage) {
-      finalMessage.textContent = "Готово";
-      finalMessage.classList.add("ok");
-    }
-  }
-}
-
-async function currentGateRows() {
-  const { data, error } = await supabaseClient
-    .from("gates")
-    .select("*")
-    .order("id");
-  if (error) {
-    throw error;
-  }
-  return data || [];
 }
 
 async function login() {
   authMessage.textContent = "";
-  const { error } = await supabaseClient.auth.signInWithPassword({
-    email: emailInput.value.trim(),
-    password: passwordInput.value,
-  });
-  if (error) {
+  loginButton.disabled = true;
+  try {
+    const data = await request("/auth/v1/token?grant_type=password", {
+      method: "POST",
+      body: JSON.stringify({
+        email: emailInput.value.trim(),
+        password: passwordInput.value,
+      }),
+    });
+    saveSession(data);
+    await showApp();
+  } catch (error) {
     authMessage.innerHTML = `<span class="error">${error.message}</span>`;
-    return;
+  } finally {
+    loginButton.disabled = false;
   }
-  await showApp();
 }
 
 async function logout() {
-  await supabaseClient.auth.signOut();
+  clearSession();
   app.classList.add("hidden");
   authCard.classList.remove("hidden");
   if (refreshTimer) {
@@ -232,10 +257,10 @@ async function showApp() {
 }
 
 async function boot() {
-  setupClient();
-  if (!supabaseClient) {
+  if (!assertConfig()) {
     return;
   }
+  loadSession();
 
   loginButton.addEventListener("click", login);
   passwordInput.addEventListener("keyup", (event) => {
@@ -245,9 +270,14 @@ async function boot() {
   });
   logoutButton.addEventListener("click", logout);
 
-  const { data } = await supabaseClient.auth.getSession();
-  if (data.session) {
-    await showApp();
+  if (session?.access_token) {
+    try {
+      await showApp();
+    } catch {
+      clearSession();
+      app.classList.add("hidden");
+      authCard.classList.remove("hidden");
+    }
   }
 }
 
